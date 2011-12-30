@@ -46,6 +46,10 @@ LOCAL_SRC_FILES:= \
     MemoryLeakTrackUtil.cpp \
     fixedfft.cpp.arm
 
+ifeq ($(BOARD_USE_YAMAHAPLAYER),true)
+    LOCAL_CFLAGS += -DYAMAHAPLAYER
+endif
+
 LOCAL_SHARED_LIBRARIES := \
 	libui libcutils libutils libbinder libsonivox libicuuc libexpat \
         libcamera_client libstagefright_foundation \
