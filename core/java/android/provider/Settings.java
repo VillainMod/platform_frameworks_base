@@ -2785,6 +2785,14 @@ public final class Settings {
          */
         public static final String STATUSBAR_BATTERY_ICON = "statusbar_battery_icon";
 
+      /**
+         * Battery text
+         * 
+         * @hide
+         */
+        public static final String STATUSBAR_BATTERY_TEXT = "statusbar_battery_text";
+
+
         /**
          * @hide
          */
