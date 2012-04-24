@@ -45,8 +45,18 @@
 #include <OMX_Component.h>
 
 #include "include/avc_utils.h"
+#ifdef SAMSUNG_CODEC_SUPPORT
+#include "include/ColorFormat.h"
+#endif
 
 namespace android {
+
+#ifdef SAMSUNG_CODEC_SUPPORT
+static const int OMX_SEC_COLOR_FormatNV12TPhysicalAddress = 0x7F000001;
+static const int OMX_SEC_COLOR_FormatNV12LPhysicalAddress = 0x7F000002;
+static const int OMX_SEC_COLOR_FormatNV12LVirtualAddress = 0x7F000003;
+static const int OMX_SEC_COLOR_FormatNV12Tiled = 0x7FC00002;
+#endif
 
 // Treat time out as an error if we have not received any output
 // buffers after 3 seconds.
@@ -179,9 +189,9 @@ static const CodecInfo kEncoderInfo[] = {
 
 #undef OPTIONAL
 
-#define CODEC_LOGI(x, ...) ALOGI("[%s] "x, mComponentName, ##__VA_ARGS__)
-#define CODEC_LOGV(x, ...) ALOGV("[%s] "x, mComponentName, ##__VA_ARGS__)
-#define CODEC_LOGE(x, ...) ALOGE("[%s] "x, mComponentName, ##__VA_ARGS__)
+#define CODEC_LOGI(x, ...) LOGI("[%s] "x, mComponentName, ##__VA_ARGS__)
+#define CODEC_LOGV(x, ...) LOGV("[%s] "x, mComponentName, ##__VA_ARGS__)
+#define CODEC_LOGE(x, ...) LOGE("[%s] "x, mComponentName, ##__VA_ARGS__)
 
 struct OMXCodecObserver : public BnOMXObserver {
     OMXCodecObserver() {
@@ -467,13 +477,13 @@ sp<MediaSource> OMXCodec::Create(
                 InstantiateSoftwareEncoder(componentName, source, meta);
 
             if (softwareCodec != NULL) {
-                ALOGV("Successfully allocated software codec '%s'", componentName);
+                LOGV("Successfully allocated software codec '%s'", componentName);
 
                 return softwareCodec;
             }
         }
 
-        ALOGV("Attempting to allocate OMX node '%s'", componentName);
+        LOGV("Attempting to allocate OMX node '%s'", componentName);
 
         uint32_t quirks = getComponentQuirks(componentNameBase, createEncoder);
 
@@ -484,7 +494,7 @@ sp<MediaSource> OMXCodec::Create(
                 // For OMX.SEC.* decoders we can enable a special mode that
                 // gives the client access to the framebuffer contents.
 
-                ALOGW("Component '%s' does not give the client access to "
+                LOGW("Component '%s' does not give the client access to "
                      "the framebuffer contents. Skipping.",
                      componentName);
 
@@ -494,7 +504,7 @@ sp<MediaSource> OMXCodec::Create(
 
         status_t err = omx->allocateNode(componentName, observer, &node);
         if (err == OK) {
-            ALOGV("Successfully allocated OMX node '%s'", componentName);
+            LOGV("Successfully allocated OMX node '%s'", componentName);
 
             sp<OMXCodec> codec = new OMXCodec(
                     omx, node, quirks, flags,
@@ -513,7 +523,7 @@ sp<MediaSource> OMXCodec::Create(
                 return codec;
             }
 
-            ALOGV("Failed to configure codec '%s'", componentName);
+            LOGV("Failed to configure codec '%s'", componentName);
         }
     }
 
@@ -600,7 +610,7 @@ status_t OMXCodec::parseAVCCodecSpecificData(
 }
 
 status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
-    ALOGV("configureCodec protected=%d",
+    LOGV("configureCodec protected=%d",
          (mFlags & kEnableGrallocUsageProtected) ? 1 : 0);
 
     if (!(mFlags & kIgnoreCodecSpecificData)) {
@@ -625,7 +635,7 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
             status_t err;
             if ((err = parseAVCCodecSpecificData(
                             data, size, &profile, &level)) != OK) {
-                ALOGE("Malformed AVC codec specific data.");
+                LOGE("Malformed AVC codec specific data.");
                 return err;
             }
 
@@ -639,7 +649,7 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
                 // does not handle this gracefully and would clobber the heap
                 // and wreak havoc instead...
 
-                ALOGE("Profile and/or level exceed the decoder's capabilities.");
+                LOGE("Profile and/or level exceed the decoder's capabilities.");
                 return ERROR_UNSUPPORTED;
             }
         } else if (meta->findData(kKeyVorbisInfo, &type, &data, &size)) {
@@ -875,6 +885,12 @@ status_t OMXCodec::setVideoPortFormatType(
     return err;
 }
 
+#ifdef SAMSUNG_CODEC_SUPPORT
+#define ALIGN_TO_8KB(x)   ((((x) + (1 << 13) - 1) >> 13) << 13)
+#define ALIGN_TO_32B(x)   ((((x) + (1 <<  5) - 1) >>  5) <<  5)
+#define ALIGN_TO_128B(x)  ((((x) + (1 <<  7) - 1) >>  7) <<  7)
+#define ALIGN(x, a)       (((x) + (a) - 1) & ~((a) - 1))
+#endif
 static size_t getFrameSize(
         OMX_COLOR_FORMATTYPE colorFormat, int32_t width, int32_t height) {
     switch (colorFormat) {
@@ -894,8 +910,21 @@ static size_t getFrameSize(
         * this part in the future
         */
         case OMX_COLOR_FormatAndroidOpaque:
+#ifdef SAMSUNG_CODEC_SUPPORT
+    case OMX_SEC_COLOR_FormatNV12TPhysicalAddress:
+    case OMX_SEC_COLOR_FormatNV12LPhysicalAddress:
+#endif
             return (width * height * 3) / 2;
 
+#ifdef SAMSUNG_CODEC_SUPPORT
+    case OMX_SEC_COLOR_FormatNV12LVirtualAddress:
+        return ALIGN((ALIGN(width, 16) * ALIGN(height, 16)), 2048) + ALIGN((ALIGN(width, 16) * ALIGN(height >> 1, 8)), 2048);
+
+    case OMX_SEC_COLOR_FormatNV12Tiled:
+        static unsigned int frameBufferYSise = ALIGN_TO_8KB(ALIGN_TO_128B(width) * ALIGN_TO_32B(height));
+        static unsigned int frameBufferUVSise = ALIGN_TO_8KB(ALIGN_TO_128B(width) * ALIGN_TO_32B(height/2));
+        return (frameBufferYSise + frameBufferUVSise);
+#endif
         default:
             CHECK(!"Should not be here. Unsupported color format.");
             break;
@@ -904,7 +933,7 @@ static size_t getFrameSize(
 
 status_t OMXCodec::findTargetColorFormat(
         const sp<MetaData>& meta, OMX_COLOR_FORMATTYPE *colorFormat) {
-    ALOGV("findTargetColorFormat");
+    LOGV("findTargetColorFormat");
     CHECK(mIsEncoder);
 
     *colorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
@@ -924,7 +953,7 @@ status_t OMXCodec::findTargetColorFormat(
 
 status_t OMXCodec::isColorFormatSupported(
         OMX_COLOR_FORMATTYPE colorFormat, int portIndex) {
-    ALOGV("isColorFormatSupported: %d", static_cast<int>(colorFormat));
+    LOGV("isColorFormatSupported: %d", static_cast<int>(colorFormat));
 
     // Enumerate all the color formats supported by
     // the omx component to see whether the given
@@ -981,7 +1010,7 @@ void OMXCodec::setVideoInputFormat(
     } else if (!strcasecmp(MEDIA_MIMETYPE_VIDEO_H263, mime)) {
         compressionFormat = OMX_VIDEO_CodingH263;
     } else {
-        ALOGE("Not a supported video mime type: %s", mime);
+        LOGE("Not a supported video mime type: %s", mime);
         CHECK(!"Should not be here. Not a supported video mime type.");
     }
 
@@ -1093,7 +1122,7 @@ status_t OMXCodec::setupErrorCorrectionParameters() {
             mNode, OMX_IndexParamVideoErrorCorrection,
             &errorCorrectionType, sizeof(errorCorrectionType));
     if (err != OK) {
-        ALOGW("Error correction param query is not supported");
+        LOGW("Error correction param query is not supported");
         return OK;  // Optional feature. Ignore this failure
     }
 
@@ -1107,7 +1136,7 @@ status_t OMXCodec::setupErrorCorrectionParameters() {
             mNode, OMX_IndexParamVideoErrorCorrection,
             &errorCorrectionType, sizeof(errorCorrectionType));
     if (err != OK) {
-        ALOGW("Error correction param configuration is not supported");
+        LOGW("Error correction param configuration is not supported");
     }
 
     // Optional feature. Ignore the failure.
@@ -1375,7 +1404,7 @@ status_t OMXCodec::setVideoOutputFormat(
     } else if (!strcasecmp(MEDIA_MIMETYPE_VIDEO_MPEG2, mime)) {
         compressionFormat = OMX_VIDEO_CodingMPEG2;
     } else {
-        ALOGE("Not a supported video mime type: %s", mime);
+        LOGE("Not a supported video mime type: %s", mime);
         CHECK(!"Should not be here. Not a supported video mime type.");
     }
 
@@ -1403,7 +1432,23 @@ status_t OMXCodec::setVideoOutputFormat(
                || format.eColorFormat == OMX_COLOR_FormatYUV420SemiPlanar
                || format.eColorFormat == OMX_COLOR_FormatCbYCrY
                || format.eColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar
-               || format.eColorFormat == OMX_QCOM_COLOR_FormatYVU420SemiPlanar);
+               || format.eColorFormat == OMX_QCOM_COLOR_FormatYVU420SemiPlanar
+#ifdef SAMSUNG_CODEC_SUPPORT
+               || format.eColorFormat == OMX_SEC_COLOR_FormatNV12TPhysicalAddress
+               || format.eColorFormat == OMX_SEC_COLOR_FormatNV12Tiled
+#endif
+               );
+#ifdef SAMSUNG_CODEC_SUPPORT
+        if (!strcmp("OMX.SEC.FP.AVC.Decoder", mComponentName) ||
+            !strcmp("OMX.SEC.AVC.Decoder", mComponentName) ||
+            !strcmp("OMX.SEC.MPEG4.Decoder", mComponentName) ||
+            !strcmp("OMX.SEC.H263.Decoder", mComponentName)) {
+            if (mNativeWindow == NULL)
+                format.eColorFormat = OMX_COLOR_FormatYUV420Planar;
+            else
+                format.eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
+        }
+#endif
 
         err = mOMX->setParameter(
                 mNode, OMX_IndexParamVideoPortFormat,
@@ -1579,7 +1624,7 @@ void OMXCodec::setComponentRole(
                 &roleParams, sizeof(roleParams));
 
         if (err != OK) {
-            ALOGW("Failed to set standard component role '%s'.", role);
+            LOGW("Failed to set standard component role '%s'.", role);
         }
     }
 }
@@ -1664,7 +1709,7 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
     }
 
     if ((mFlags & kEnableGrallocUsageProtected) && portIndex == kPortIndexOutput) {
-        ALOGE("protected output buffers must be stent to an ANativeWindow");
+        LOGE("protected output buffers must be stent to an ANativeWindow");
         return PERMISSION_DENIED;
     }
 
@@ -1673,7 +1718,7 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
             && portIndex == kPortIndexInput) {
         err = mOMX->storeMetaDataInBuffers(mNode, kPortIndexInput, OMX_TRUE);
         if (err != OK) {
-            ALOGE("Storing meta data in video buffers is not supported");
+            LOGE("Storing meta data in video buffers is not supported");
             return err;
         }
     }
@@ -1735,7 +1780,7 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
         }
 
         if (err != OK) {
-            ALOGE("allocate_buffer_with_backup failed");
+            LOGE("allocate_buffer_with_backup failed");
             return err;
         }
 
@@ -1841,15 +1886,36 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     if (err != OK) {
         return err;
     }
-
+#ifndef SAMSUNG_CODEC_SUPPORT
     err = native_window_set_buffers_geometry(
             mNativeWindow.get(),
             def.format.video.nFrameWidth,
             def.format.video.nFrameHeight,
             def.format.video.eColorFormat);
+#else
+    OMX_COLOR_FORMATTYPE eColorFormat;
 
+    switch (def.format.video.eColorFormat) {
+    case OMX_SEC_COLOR_FormatNV12TPhysicalAddress:
+        eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_CUSTOM_YCbCr_420_SP_TILED;
+        break;
+    case OMX_COLOR_FormatYUV420SemiPlanar:
+        eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_SP;
+        break;
+    case OMX_COLOR_FormatYUV420Planar:
+    default:
+        eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_P;
+        break;
+    }
+
+    err = native_window_set_buffers_geometry(
+            mNativeWindow.get(),
+            def.format.video.nFrameWidth,
+            def.format.video.nFrameHeight,
+            eColorFormat);
+#endif
     if (err != 0) {
-        ALOGE("native_window_set_buffers_geometry failed: %s (%d)",
+        LOGE("native_window_set_buffers_geometry failed: %s (%d)",
                 strerror(-err), -err);
         return err;
     }
@@ -1863,7 +1929,7 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     OMX_U32 usage = 0;
     err = mOMX->getGraphicBufferUsage(mNode, kPortIndexOutput, &usage);
     if (err != 0) {
-        ALOGW("querying usage flags from OMX IL component failed: %d", err);
+        LOGW("querying usage flags from OMX IL component failed: %d", err);
         // XXX: Currently this error is logged, but not fatal.
         usage = 0;
     }
@@ -1881,20 +1947,25 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
                 mNativeWindow.get(), NATIVE_WINDOW_QUEUES_TO_WINDOW_COMPOSER,
                 &queuesToNativeWindow);
         if (err != 0) {
-            ALOGE("error authenticating native window: %d", err);
+            LOGE("error authenticating native window: %d", err);
             return err;
         }
         if (queuesToNativeWindow != 1) {
-            ALOGE("native window could not be authenticated");
+            LOGE("native window could not be authenticated");
             return PERMISSION_DENIED;
         }
     }
 
-    ALOGV("native_window_set_usage usage=0x%lx", usage);
+    LOGV("native_window_set_usage usage=0x%lx", usage);
+#ifndef SAMSUNG_CODEC_SUPPORT
     err = native_window_set_usage(
             mNativeWindow.get(), usage | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP);
+#else
+    err = native_window_set_usage(
+            mNativeWindow.get(), usage | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP | GRALLOC_USAGE_HW_FIMC1 | GRALLOC_USAGE_HWC_HWOVERLAY);
+#endif
     if (err != 0) {
-        ALOGE("native_window_set_usage failed: %s (%d)", strerror(-err), -err);
+        LOGE("native_window_set_usage failed: %s (%d)", strerror(-err), -err);
         return err;
     }
 
@@ -1902,7 +1973,7 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     err = mNativeWindow->query(mNativeWindow.get(),
             NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS, &minUndequeuedBufs);
     if (err != 0) {
-        ALOGE("NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS query failed: %s (%d)",
+        LOGE("NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS query failed: %s (%d)",
                 strerror(-err), -err);
         return err;
     }
@@ -1925,7 +1996,7 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     err = native_window_set_buffer_count(
             mNativeWindow.get(), def.nBufferCountActual);
     if (err != 0) {
-        ALOGE("native_window_set_buffer_count failed: %s (%d)", strerror(-err),
+        LOGE("native_window_set_buffer_count failed: %s (%d)", strerror(-err),
                 -err);
         return err;
     }
@@ -1938,7 +2009,7 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         ANativeWindowBuffer* buf;
         err = mNativeWindow->dequeueBuffer(mNativeWindow.get(), &buf);
         if (err != 0) {
-            ALOGE("dequeueBuffer failed: %s (%d)", strerror(-err), -err);
+            LOGE("dequeueBuffer failed: %s (%d)", strerror(-err), -err);
             break;
         }
 
@@ -2052,7 +2123,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     err = native_window_api_disconnect(mNativeWindow.get(),
             NATIVE_WINDOW_API_MEDIA);
     if (err != NO_ERROR) {
-        ALOGE("error pushing blank frames: api_disconnect failed: %s (%d)",
+        LOGE("error pushing blank frames: api_disconnect failed: %s (%d)",
                 strerror(-err), -err);
         return err;
     }
@@ -2060,7 +2131,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     err = native_window_api_connect(mNativeWindow.get(),
             NATIVE_WINDOW_API_CPU);
     if (err != NO_ERROR) {
-        ALOGE("error pushing blank frames: api_connect failed: %s (%d)",
+        LOGE("error pushing blank frames: api_connect failed: %s (%d)",
                 strerror(-err), -err);
         return err;
     }
@@ -2068,7 +2139,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     err = native_window_set_scaling_mode(mNativeWindow.get(),
             NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
     if (err != NO_ERROR) {
-        ALOGE("error pushing blank frames: set_buffers_geometry failed: %s (%d)",
+        LOGE("error pushing blank frames: set_buffers_geometry failed: %s (%d)",
                 strerror(-err), -err);
         goto error;
     }
@@ -2076,7 +2147,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     err = native_window_set_buffers_geometry(mNativeWindow.get(), 1, 1,
             HAL_PIXEL_FORMAT_RGBX_8888);
     if (err != NO_ERROR) {
-        ALOGE("error pushing blank frames: set_buffers_geometry failed: %s (%d)",
+        LOGE("error pushing blank frames: set_buffers_geometry failed: %s (%d)",
                 strerror(-err), -err);
         goto error;
     }
@@ -2084,7 +2155,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     err = native_window_set_usage(mNativeWindow.get(),
             GRALLOC_USAGE_SW_WRITE_OFTEN);
     if (err != NO_ERROR) {
-        ALOGE("error pushing blank frames: set_usage failed: %s (%d)",
+        LOGE("error pushing blank frames: set_usage failed: %s (%d)",
                 strerror(-err), -err);
         goto error;
     }
@@ -2092,7 +2163,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     err = mNativeWindow->query(mNativeWindow.get(),
             NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS, &minUndequeuedBufs);
     if (err != NO_ERROR) {
-        ALOGE("error pushing blank frames: MIN_UNDEQUEUED_BUFFERS query "
+        LOGE("error pushing blank frames: MIN_UNDEQUEUED_BUFFERS query "
                 "failed: %s (%d)", strerror(-err), -err);
         goto error;
     }
@@ -2100,7 +2171,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     numBufs = minUndequeuedBufs + 1;
     err = native_window_set_buffer_count(mNativeWindow.get(), numBufs);
     if (err != NO_ERROR) {
-        ALOGE("error pushing blank frames: set_buffer_count failed: %s (%d)",
+        LOGE("error pushing blank frames: set_buffer_count failed: %s (%d)",
                 strerror(-err), -err);
         goto error;
     }
@@ -2112,7 +2183,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     for (int i = 0; i < numBufs + 1; i++) {
         err = mNativeWindow->dequeueBuffer(mNativeWindow.get(), &anb);
         if (err != NO_ERROR) {
-            ALOGE("error pushing blank frames: dequeueBuffer failed: %s (%d)",
+            LOGE("error pushing blank frames: dequeueBuffer failed: %s (%d)",
                     strerror(-err), -err);
             goto error;
         }
@@ -2121,7 +2192,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
         err = mNativeWindow->lockBuffer(mNativeWindow.get(),
                 buf->getNativeBuffer());
         if (err != NO_ERROR) {
-            ALOGE("error pushing blank frames: lockBuffer failed: %s (%d)",
+            LOGE("error pushing blank frames: lockBuffer failed: %s (%d)",
                     strerror(-err), -err);
             goto error;
         }
@@ -2130,7 +2201,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
         uint32_t* img = NULL;
         err = buf->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, (void**)(&img));
         if (err != NO_ERROR) {
-            ALOGE("error pushing blank frames: lock failed: %s (%d)",
+            LOGE("error pushing blank frames: lock failed: %s (%d)",
                     strerror(-err), -err);
             goto error;
         }
@@ -2139,7 +2210,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
 
         err = buf->unlock();
         if (err != NO_ERROR) {
-            ALOGE("error pushing blank frames: unlock failed: %s (%d)",
+            LOGE("error pushing blank frames: unlock failed: %s (%d)",
                     strerror(-err), -err);
             goto error;
         }
@@ -2147,7 +2218,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
         err = mNativeWindow->queueBuffer(mNativeWindow.get(),
                 buf->getNativeBuffer());
         if (err != NO_ERROR) {
-            ALOGE("error pushing blank frames: queueBuffer failed: %s (%d)",
+            LOGE("error pushing blank frames: queueBuffer failed: %s (%d)",
                     strerror(-err), -err);
             goto error;
         }
@@ -2174,7 +2245,7 @@ error:
         err = native_window_api_disconnect(mNativeWindow.get(),
                 NATIVE_WINDOW_API_CPU);
         if (err != NO_ERROR) {
-            ALOGE("error pushing blank frames: api_disconnect failed: %s (%d)",
+            LOGE("error pushing blank frames: api_disconnect failed: %s (%d)",
                     strerror(-err), -err);
             return err;
         }
@@ -2182,7 +2253,7 @@ error:
         err = native_window_api_connect(mNativeWindow.get(),
                 NATIVE_WINDOW_API_MEDIA);
         if (err != NO_ERROR) {
-            ALOGE("error pushing blank frames: api_connect failed: %s (%d)",
+            LOGE("error pushing blank frames: api_connect failed: %s (%d)",
                     strerror(-err), -err);
             return err;
         }
@@ -2214,7 +2285,7 @@ int64_t OMXCodec::retrieveDecodingTimeUs(bool isCodecSpecific) {
 
 void OMXCodec::on_message(const omx_message &msg) {
     if (mState == ERROR) {
-        ALOGW("Dropping OMX message - we're in ERROR state.");
+        LOGW("Dropping OMX message - we're in ERROR state.");
         return;
     }
 
@@ -2242,7 +2313,7 @@ void OMXCodec::on_message(const omx_message &msg) {
 
             CHECK(i < buffers->size());
             if ((*buffers)[i].mStatus != OWNED_BY_COMPONENT) {
-                ALOGW("We already own input buffer %p, yet received "
+                LOGW("We already own input buffer %p, yet received "
                      "an EMPTY_BUFFER_DONE.", buffer);
             }
 
@@ -2302,7 +2373,7 @@ void OMXCodec::on_message(const omx_message &msg) {
             BufferInfo *info = &buffers->editItemAt(i);
 
             if (info->mStatus != OWNED_BY_COMPONENT) {
-                ALOGW("We already own output buffer %p, yet received "
+                LOGW("We already own output buffer %p, yet received "
                      "a FILL_BUFFER_DONE.", buffer);
             }
 
@@ -2568,7 +2639,7 @@ void OMXCodec::onEvent(OMX_EVENTTYPE event, OMX_U32 data1, OMX_U32 data2) {
                         // The scale is in 16.16 format.
                         // scale 1.0 = 0x010000. When there is no
                         // need to change the display, skip it.
-                        ALOGV("Get OMX_IndexConfigScale: 0x%lx/0x%lx",
+                        LOGV("Get OMX_IndexConfigScale: 0x%lx/0x%lx",
                                 scale.xWidth, scale.xHeight);
 
                         if (scale.xWidth != 0x010000) {
@@ -3238,11 +3309,47 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
                 CHECK(info->mMediaBuffer == NULL);
                 info->mMediaBuffer = srcBuffer;
             } else {
+#ifndef SAMSUNG_CODEC_SUPPORT
                 CHECK(srcBuffer->data() != NULL) ;
                 memcpy((uint8_t *)info->mData + offset,
                         (const uint8_t *)srcBuffer->data()
                             + srcBuffer->range_offset(),
                         srcBuffer->range_length());
+#else
+                OMX_PARAM_PORTDEFINITIONTYPE def;
+                InitOMXParams(&def);
+                def.nPortIndex = kPortIndexInput;
+
+                status_t err = mOMX->getParameter(mNode, OMX_IndexParamPortDefinition,
+                                                  &def, sizeof(def));
+                CHECK_EQ(err, (status_t)OK);
+
+                if (def.eDomain == OMX_PortDomainVideo) {
+                    OMX_VIDEO_PORTDEFINITIONTYPE *videoDef = &def.format.video;
+                    switch (videoDef->eColorFormat) {
+                    case OMX_SEC_COLOR_FormatNV12LVirtualAddress: {
+                        CHECK(srcBuffer->data() != NULL);
+                        void *pSharedMem = (void *)(srcBuffer->data());
+                        memcpy((uint8_t *)info->mData + offset,
+                                (const void *)&pSharedMem, sizeof(void *));
+                        break;
+                    }
+                    default:
+                        CHECK(srcBuffer->data() != NULL);
+                        memcpy((uint8_t *)info->mData + offset,
+                                (const uint8_t *)srcBuffer->data()
+                                    + srcBuffer->range_offset(),
+                                srcBuffer->range_length());
+                        break;
+                    }
+                } else {
+                    CHECK(srcBuffer->data() != NULL);
+                    memcpy((uint8_t *)info->mData + offset,
+                            (const uint8_t *)srcBuffer->data()
+                                + srcBuffer->range_offset(),
+                            srcBuffer->range_length());
+                }
+#endif
             }
         }
 
@@ -3296,7 +3403,7 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
     }
 
     if (n > 1) {
-        ALOGV("coalesced %d frames into one input buffer", n);
+        LOGV("coalesced %d frames into one input buffer", n);
     }
 
     OMX_U32 flags = OMX_BUFFERFLAG_ENDOFFRAME;
@@ -3556,7 +3663,7 @@ void OMXCodec::setAMRFormat(bool isWAMR, int32_t bitRate) {
 
 status_t OMXCodec::setAACFormat(int32_t numChannels, int32_t sampleRate, int32_t bitRate) {
     if (numChannels > 2)
-        ALOGW("Number of channels: (%d) \n", numChannels);
+        LOGW("Number of channels: (%d) \n", numChannels);
 
     if (mIsEncoder) {
         //////////////// input port ////////////////////
@@ -4130,7 +4237,22 @@ static const char *colorFormatString(OMX_COLOR_FORMATTYPE type) {
 
     if (type == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar) {
         return "OMX_TI_COLOR_FormatYUV420PackedSemiPlanar";
-    } else if (type == OMX_QCOM_COLOR_FormatYVU420SemiPlanar) {
+	}
+#ifdef SAMSUNG_CODEC_SUPPORT
+    if (type == OMX_SEC_COLOR_FormatNV12TPhysicalAddress) {
+        return "OMX_SEC_COLOR_FormatNV12TPhysicalAddress";
+    }
+    if (type == OMX_SEC_COLOR_FormatNV12LPhysicalAddress) {
+        return "OMX_SEC_COLOR_FormatNV12LPhysicalAddress";
+    }
+    if (type == OMX_SEC_COLOR_FormatNV12LVirtualAddress) {
+        return "OMX_SEC_COLOR_FormatNV12LVirtualAddress";
+    }
+    if (type == OMX_SEC_COLOR_FormatNV12Tiled) {
+        return "OMX_SEC_COLOR_FormatNV12Tiled";
+    }
+#endif
+    else if (type == OMX_QCOM_COLOR_FormatYVU420SemiPlanar) {
         return "OMX_QCOM_COLOR_FormatYVU420SemiPlanar";
     } else if (type < 0 || (size_t)type >= numNames) {
         return "UNKNOWN";
@@ -4466,14 +4588,14 @@ void OMXCodec::initOutputFormat(const sp<MetaData> &inputFormat) {
                 inputFormat->findInt32(kKeySampleRate, &sampleRate);
 
                 if ((OMX_U32)numChannels != params.nChannels) {
-                    ALOGV("Codec outputs a different number of channels than "
+                    LOGV("Codec outputs a different number of channels than "
                          "the input stream contains (contains %d channels, "
                          "codec outputs %ld channels).",
                          numChannels, params.nChannels);
                 }
 
                 if (sampleRate != (int32_t)params.nSamplingRate) {
-                    ALOGV("Codec outputs at different sampling rate than "
+                    LOGV("Codec outputs at different sampling rate than "
                          "what the input stream contains (contains data at "
                          "%d Hz, codec outputs %lu Hz)",
                          sampleRate, params.nSamplingRate);
@@ -4571,6 +4693,13 @@ void OMXCodec::initOutputFormat(const sp<MetaData> &inputFormat) {
                         video_def->nFrameWidth, video_def->nFrameHeight);
 
                 if (err == OK) {
+#ifdef SAMSUNG_CODEC_SUPPORT
+                    /* Hack GetConfig */
+                    rect.nLeft = 0;
+                    rect.nTop = 0;
+                    rect.nWidth = video_def->nFrameWidth;
+                    rect.nHeight = video_def->nFrameHeight;
+#endif
                     CHECK_GE(rect.nLeft, 0);
                     CHECK_GE(rect.nTop, 0);
                     CHECK_GE(rect.nWidth, 0u);
